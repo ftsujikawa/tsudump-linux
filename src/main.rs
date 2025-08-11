@@ -3,6 +3,22 @@ use gimli::{EndianSlice, LittleEndian, Reader, Dwarf, DwLang, DwTag, DwAt};
 
 use iced_x86::{Decoder, DecoderOptions, Formatter, Instruction, NasmFormatter};
 
+// Helper function to get virtual base address from ELF file
+fn get_virtual_base_address(file: &ElfBytes<AnyEndian>) -> u64 {
+    // Try to get program headers
+    if let Some(program_headers) = file.segments() {
+        for phdr in program_headers.iter() {
+            // Look for the first LOAD segment with executable permission
+            if phdr.p_type == 1 && (phdr.p_flags & 1) != 0 { // PT_LOAD and PF_X
+                return phdr.p_vaddr;
+            }
+        }
+    }
+    
+    // Fallback: try to get entry point from ELF header
+    file.ehdr.e_entry
+}
+
 fn dwarf_version_to_string(version: u16) -> &'static str {
     match version {
         1 => "DWARF1",
@@ -1470,7 +1486,7 @@ fn dump_dwarf_detailed(file: &ElfBytes<AnyEndian>) {
 
 
 // Helper function to get detailed attribute value information
-fn get_attribute_value_details(attr: &gimli::Attribute<gimli::EndianSlice<gimli::LittleEndian>>, dwarf: &gimli::Dwarf<gimli::EndianSlice<gimli::LittleEndian>>) -> String {
+fn get_attribute_value_details(attr: &gimli::Attribute<gimli::EndianSlice<gimli::LittleEndian>>, dwarf: &gimli::Dwarf<gimli::EndianSlice<gimli::LittleEndian>>, base_address: u64) -> String {
     // Special handling for DW_AT_name attribute
     if attr.name() == gimli::DW_AT_name {
         match attr.value() {
@@ -1495,7 +1511,13 @@ fn get_attribute_value_details(attr: &gimli::Attribute<gimli::EndianSlice<gimli:
     
     match attr.value() {
         gimli::AttributeValue::Addr(addr) => {
-            format!("Address: 0x{:x} (DW_FORM_addr)", addr)
+            // Special handling for DW_AT_low_pc and DW_AT_high_pc: add virtual base address
+            if attr.name() == gimli::DW_AT_low_pc || attr.name() == gimli::DW_AT_high_pc {
+                let virtual_addr = base_address + addr;
+                format!("Address: 0x{:x} (0x{:x} + 0x{:x}) (DW_FORM_addr)", virtual_addr, base_address, addr)
+            } else {
+                format!("Address: 0x{:x} (DW_FORM_addr)", addr)
+            }
         },
         gimli::AttributeValue::Block(block) => {
             format!("Block: {} bytes (DW_FORM_block*)", block.len())
@@ -1567,6 +1589,9 @@ fn get_attribute_value_details(attr: &gimli::Attribute<gimli::EndianSlice<gimli:
 
 fn dump_dwarf_with_crate(file: &ElfBytes<AnyEndian>) {
     println!("\n=== DWARF Analysis with dwarf crate ===");
+    
+    // Get virtual base address for proper address calculation
+    let base_address = get_virtual_base_address(file);
     
     let section_headers = match file.section_headers() {
         Some(headers) => headers,
@@ -1721,11 +1746,20 @@ fn dump_dwarf_with_crate(file: &ElfBytes<AnyEndian>) {
                                 Err(_) => "location[invalid]".to_string(),
                             }
                         },
+                        gimli::AttributeValue::Addr(addr) => {
+                            // Special handling for DW_AT_low_pc and DW_AT_high_pc: add virtual base address
+                            if attr.name() == gimli::DW_AT_low_pc || attr.name() == gimli::DW_AT_high_pc {
+                                let virtual_addr = base_address + addr;
+                                format!("Addr(0x{:x})", virtual_addr)
+                            } else {
+                                format!("{:?}", attr.value())
+                            }
+                        },
                         _ => format!("{:?}", attr.value()),
                     };
                     
                     println!("    {}: {}", attr_name, attr_value);
-                    println!("      Form details: {}", get_attribute_value_details(&attr, &dwarf));
+                    println!("      Form details: {}", get_attribute_value_details(&attr, &dwarf, base_address));
                     _attr_count += 1;
                 }
                 
@@ -1779,11 +1813,20 @@ fn dump_dwarf_with_crate(file: &ElfBytes<AnyEndian>) {
                                         Err(_) => "location[invalid]".to_string(),
                                     }
                                 },
+                                gimli::AttributeValue::Addr(addr) => {
+                                    // Special handling for DW_AT_low_pc and DW_AT_high_pc: add virtual base address
+                                    if attr.name() == gimli::DW_AT_low_pc || attr.name() == gimli::DW_AT_high_pc {
+                                        let virtual_addr = base_address + addr;
+                                        format!("Addr(0x{:x})", virtual_addr)
+                                    } else {
+                                        format!("{:?}", attr.value())
+                                    }
+                                },
                                 _ => format!("{:?}", attr.value()),
                             };
                             
                             println!("      {}: {}", attr_name, attr_value);
-                            println!("        Form details: {}", get_attribute_value_details(&attr, &dwarf));
+                            println!("        Form details: {}", get_attribute_value_details(&attr, &dwarf, base_address));
                             _attr_count += 1;
                         }
                         
