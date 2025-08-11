@@ -1,7 +1,7 @@
 use elf::{ElfBytes, endian::AnyEndian};
 use gimli::{EndianSlice, LittleEndian, Reader, Dwarf, DwLang, DwTag, DwAt};
-
 use iced_x86::{Decoder, DecoderOptions, Formatter, Instruction, NasmFormatter};
+use clap::{Parser, Subcommand};
 
 // Helper function to get virtual base address from ELF file
 fn get_virtual_base_address(file: &ElfBytes<AnyEndian>) -> u64 {
@@ -1885,21 +1885,44 @@ fn dump_dwarf_with_crate(file: &ElfBytes<AnyEndian>) {
     }
 }
 
-
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
+#[derive(Parser)]
+#[command(name = "tsudump-linux")]
+#[command(about = "ELF file analysis and DWARF debugging information dumper")]
+struct Cli {
+    /// ELF file to analyze
+    file: String,
     
-    if args.len() != 2 {
-        eprintln!("Usage: {} <elf_file>", args[0]);
-        std::process::exit(1);
-    }
-    
-    let path = std::path::PathBuf::from(&args[1]);
-    let file_data = std::fs::read(&path).expect("Could not read file.");
-    let slice = file_data.as_slice();
-    let file = ElfBytes::<AnyEndian>::minimal_parse(slice).expect("Open test1");
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
 
-    // Read and display ELF header information
+#[derive(Subcommand)]
+enum Commands {
+    /// Dump ELF header information
+    Header,
+    /// Dump section headers
+    Sections,
+    /// Dump .text section with disassembly
+    Text,
+    /// Dump .data section
+    Data,
+    /// Dump symbol tables
+    Symbols,
+    /// Dump line number information
+    Line,
+    /// Dump debug sections overview
+    Debug,
+    /// Dump detailed .debug_info section
+    DebugInfo,
+    /// Dump detailed DWARF information
+    DwarfDetailed,
+    /// Dump DWARF information using gimli crate
+    DwarfGimli,
+    /// Dump all information (default behavior)
+    All,
+}
+
+fn dump_elf_header(file: &ElfBytes<AnyEndian>) {
     println!("=== ELF Header Information ===");
     let ehdr = file.ehdr;
     
@@ -1946,38 +1969,73 @@ fn main() {
     println!("Number of section headers: {}", ehdr.e_shnum);
     println!("Section header string table index: {}", ehdr.e_shstrndx);
     println!();
+}
 
-    // Dump section headers
-    dump_section_headers(&file);
+fn main() {
+    let cli = Cli::parse();
+    let file_path = std::path::PathBuf::from(&cli.file);
+    let file_data = std::fs::read(&file_path).expect("Could not read file.");
+    let slice = file_data.as_slice();
+    let file = ElfBytes::<AnyEndian>::minimal_parse(slice).expect("Failed to parse ELF file");
 
-    // Dump .text section
-    println!();
-    println!("=== .text Section Dump ===");
-    dump_text_section(&file);
-
-    // Dump .data section
-    println!();
-    println!("=== .data Section Dump ===");
-    dump_data_section(&file);
-
-    // Dump symbol tables
-    println!();
-    dump_symbol_section(&file);
-
-    // Dump .line section
-    println!();
-    println!("=== .line Section Dump ===");
-    dump_line_section(&file);
-
-    // Dump debug sections
-    dump_debug_sections(&file);
-
-    // Dump .debug_info section in detail
-    dump_debug_info_section(&file);
-
-    // Dump DWARF information in detail
-    dump_dwarf_detailed(&file);
-
-    // Dump DWARF information using dwarf crate
-    dump_dwarf_with_crate(&file);
+    match cli.command {
+        Some(Commands::Header) => {
+            dump_elf_header(&file);
+        },
+        Some(Commands::Sections) => {
+            dump_section_headers(&file);
+        },
+        Some(Commands::Text) => {
+            println!("=== .text Section Dump ===");
+            dump_text_section(&file);
+        },
+        Some(Commands::Data) => {
+            println!("=== .data Section Dump ===");
+            dump_data_section(&file);
+        },
+        Some(Commands::Symbols) => {
+            dump_symbol_section(&file);
+        },
+        Some(Commands::Line) => {
+            println!("=== .line Section Dump ===");
+            dump_line_section(&file);
+        },
+        Some(Commands::Debug) => {
+            dump_debug_sections(&file);
+        },
+        Some(Commands::DebugInfo) => {
+            dump_debug_info_section(&file);
+        },
+        Some(Commands::DwarfDetailed) => {
+            dump_dwarf_detailed(&file);
+        },
+        Some(Commands::DwarfGimli) => {
+            dump_dwarf_with_crate(&file);
+        },
+        Some(Commands::All) | None => {
+            // Default behavior: dump all information
+            dump_elf_header(&file);
+            dump_section_headers(&file);
+            
+            println!();
+            println!("=== .text Section Dump ===");
+            dump_text_section(&file);
+            
+            println!();
+            println!("=== .data Section Dump ===");
+            dump_data_section(&file);
+            
+            println!();
+            dump_symbol_section(&file);
+            
+            println!();
+            println!("=== .line Section Dump ===");
+            dump_line_section(&file);
+            
+            dump_debug_sections(&file);
+            dump_debug_info_section(&file);
+            dump_dwarf_detailed(&file);
+            dump_dwarf_with_crate(&file);
+        }
+    }
 }
