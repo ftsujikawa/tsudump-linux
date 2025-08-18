@@ -191,7 +191,7 @@ fn dwarf_at_to_string(at: DwAt) -> &'static str {
         DwAt(0x30) => "DW_AT_accessibility",
         DwAt(0x31) => "DW_AT_address_class",
         DwAt(0x32) => "DW_AT_artificial",
-        DwAt(0x33) => "DW_AT_base_types",
+        DwAt(0x33) => "DW_TAG_base_types",
         DwAt(0x34) => "DW_AT_calling_convention",
         DwAt(0x35) => "DW_AT_count",
         DwAt(0x36) => "DW_AT_data_member_location",
@@ -250,38 +250,6 @@ fn dwarf_at_to_string(at: DwAt) -> &'static str {
         DwAt(0x6b) => "DW_AT_enum_class",
         DwAt(0x6c) => "DW_AT_linkage_name",
         _ => "DW_AT_unknown",
-    }
-}
-
-fn dwarf_form_to_string(form: u64) -> &'static str {
-    match form {
-        0x01 => "DW_FORM_addr",
-        0x03 => "DW_FORM_block2",
-        0x04 => "DW_FORM_block4",
-        0x05 => "DW_FORM_data2",
-        0x06 => "DW_FORM_data4",
-        0x07 => "DW_FORM_data8",
-        0x08 => "DW_FORM_string",
-        0x09 => "DW_FORM_block",
-        0x0a => "DW_FORM_block1",
-        0x0b => "DW_FORM_data1",
-        0x0c => "DW_FORM_flag",
-        0x0d => "DW_FORM_sdata",
-        0x0e => "DW_FORM_strp",
-        0x0f => "DW_FORM_udata",
-        0x10 => "DW_FORM_ref_addr",
-        0x11 => "DW_FORM_ref1",
-        0x12 => "DW_FORM_ref2",
-        0x13 => "DW_FORM_ref4",
-        0x14 => "DW_FORM_ref8",
-        0x15 => "DW_FORM_ref_udata",
-        0x16 => "DW_FORM_indirect",
-        0x17 => "DW_FORM_sec_offset",
-        0x18 => "DW_FORM_exprloc",
-        0x19 => "DW_FORM_flag_present",
-        0x1f => "DW_FORM_line_strp",
-        0x20 => "DW_FORM_ref_sig8",
-        _ => "DW_FORM_unknown",
     }
 }
 
@@ -753,7 +721,7 @@ fn dump_section_headers(file: &ElfBytes<AnyEndian>) {
              "#", "Name", "Type", "Address", "Offset", "Size", "EntSize", "Flags", "Link", "Info", "Align");
     println!("{}", "-".repeat(120));
     
-    let section_headers = match file.section_headers() {
+    let _section_headers = match file.section_headers() {
         Some(headers) => headers,
         None => {
             println!("No section headers found");
@@ -769,7 +737,7 @@ fn dump_section_headers(file: &ElfBytes<AnyEndian>) {
         }
     };
     
-    for (i, section_header) in section_headers.iter().enumerate() {
+    for (i, section_header) in _section_headers.iter().enumerate() {
         let section_name = match string_table {
             Some(ref strtab) => {
                 strtab.get(section_header.sh_name as usize)
@@ -830,7 +798,7 @@ fn dump_section_headers(file: &ElfBytes<AnyEndian>) {
 fn dump_debug_sections(file: &ElfBytes<AnyEndian>) {
     println!("\n=== Debug Sections ===");
     
-    let section_headers = match file.section_headers() {
+    let _section_headers = match file.section_headers() {
         Some(headers) => headers,
         None => {
             println!("No section headers found");
@@ -849,7 +817,7 @@ fn dump_debug_sections(file: &ElfBytes<AnyEndian>) {
     let mut debug_sections = Vec::new();
     
     // Find all debug sections
-    for (i, section_header) in section_headers.iter().enumerate() {
+    for (i, section_header) in _section_headers.iter().enumerate() {
         let section_name = match string_table {
             Some(ref strtab) => {
                 strtab.get(section_header.sh_name as usize)
@@ -890,13 +858,8 @@ fn dump_debug_sections(file: &ElfBytes<AnyEndian>) {
             _ => "Unknown debug section"
         };
         
-        println!("{:>3} {:>20} {:>16x} {:>16x} {:>10x} {}",
-                 i,
-                 section_name,
-                 section_header.sh_addr,
-                 section_header.sh_offset,
-                 section_header.sh_size,
-                 description);
+        println!("{:>3} {:>20} {:>16x} {:>16x} {:>10x} {}", 
+                 i, section_name, section_header.sh_addr, section_header.sh_offset, section_header.sh_size, description);
     }
     
     // Show detailed content for some debug sections
@@ -968,6 +931,44 @@ fn extract_debug_str_strings(file: &ElfBytes<AnyEndian>, section_header: &elf::s
     println!("Section offset: 0x{:x}", section_header.sh_offset);
     println!();
     
+    // Hexadecimal dump
+    println!("--- Hex Dump ---");
+    for (i, byte) in section_data.iter().enumerate() {
+        if i % 16 == 0 {
+            if i != 0 {
+                print!(" | ");
+                for j in i-16..i {
+                    let b = section_data[j];
+                    if b.is_ascii_graphic() || b == b' ' {
+                        print!("{}", b as char);
+                    } else {
+                        print!(".");
+                    }
+                }
+                println!("|");
+            }
+            print!("0x{:08x}: ", i);
+        }
+        print!("{:02x} ", byte);
+    }
+    let remainder = section_data.len() % 16;
+    if remainder != 0 {
+        for _ in remainder..16 {
+            print!("   ");
+        }
+        print!(" | ");
+        for j in section_data.len()-remainder..section_data.len() {
+            let b = section_data[j];
+            if b.is_ascii_graphic() || b == b' ' {
+                print!("{}", b as char);
+            } else {
+                print!(".");
+            }
+        }
+        println!("|");
+    }
+    println!();
+
     // Extract null-terminated strings
     let mut strings = Vec::new();
     let mut current_string = Vec::new();
@@ -1076,7 +1077,7 @@ fn extract_debug_str_strings(file: &ElfBytes<AnyEndian>, section_header: &elf::s
 fn dump_debug_info_section(file: &ElfBytes<AnyEndian>) {
     println!("\n=== .debug_info Section Analysis ===");
     
-    let section_headers = match file.section_headers() {
+    let _section_headers = match file.section_headers() {
         Some(headers) => headers,
         None => {
             println!("No section headers found");
@@ -1094,7 +1095,7 @@ fn dump_debug_info_section(file: &ElfBytes<AnyEndian>) {
     
     // Find .debug_info section
     let mut debug_info_section = None;
-    for section_header in section_headers.iter() {
+    for section_header in _section_headers.iter() {
         let section_name = match string_table {
             Some(ref strtab) => {
                 strtab.get(section_header.sh_name as usize)
@@ -1239,7 +1240,7 @@ fn dump_debug_info_section(file: &ElfBytes<AnyEndian>) {
 fn dump_dwarf_detailed(file: &ElfBytes<AnyEndian>) {
     println!("\n=== DWARF Debug Information (Detailed) ===");
     
-    let section_headers = match file.section_headers() {
+    let _section_headers = match file.section_headers() {
         Some(headers) => headers,
         None => {
             println!("No section headers found");
@@ -1255,12 +1256,10 @@ fn dump_dwarf_detailed(file: &ElfBytes<AnyEndian>) {
         }
     };
     
-    // Find debug sections
-    let mut debug_info_section = None;
-    let mut debug_abbrev_section = None;
-    let mut debug_str_section = None;
+    // Find and load all DWARF sections
+    let mut debug_sections = std::collections::HashMap::new();
     
-    for section_header in section_headers.iter() {
+    for section_header in _section_headers.iter() {
         let section_name = match string_table {
             Some(ref strtab) => {
                 strtab.get(section_header.sh_name as usize)
@@ -1269,221 +1268,269 @@ fn dump_dwarf_detailed(file: &ElfBytes<AnyEndian>) {
             None => "<no-strtab>"
         };
         
-        match section_name {
-            ".debug_info" => debug_info_section = Some(section_header),
-            ".debug_abbrev" => debug_abbrev_section = Some(section_header),
-            ".debug_str" => debug_str_section = Some(section_header),
-            _ => {}
+        if section_name.starts_with(".debug_") {
+            if let Ok((data, _)) = file.section_data(&section_header) {
+                debug_sections.insert(section_name.to_string(), data);
+            }
         }
     }
     
-    let debug_info_header = match debug_info_section {
-        Some(header) => header,
-        None => {
-            println!(".debug_info section not found");
-            return;
-        }
+    println!("Found {} debug sections", debug_sections.len());
+    
+    // Create DWARF object using the dwarf crate
+    let debug_info = debug_sections.get(".debug_info").copied().unwrap_or(&[]);
+    let debug_abbrev = debug_sections.get(".debug_abbrev").copied().unwrap_or(&[]);
+    let debug_str = debug_sections.get(".debug_str").copied().unwrap_or(&[]);
+    let debug_line = debug_sections.get(".debug_line").copied().unwrap_or(&[]);
+    let debug_line_str = debug_sections.get(".debug_line_str").copied().unwrap_or(&[]);
+    let debug_ranges = debug_sections.get(".debug_ranges").copied().unwrap_or(&[]);
+    let debug_loc = debug_sections.get(".debug_loc").copied().unwrap_or(&[]);
+    
+    println!("Section sizes:");
+    println!("  .debug_info: {} bytes", debug_info.len());
+    println!("  .debug_abbrev: {} bytes", debug_abbrev.len());
+    println!("  .debug_str: {} bytes", debug_str.len());
+    println!("  .debug_line: {} bytes", debug_line.len());
+    println!("  .debug_line_str: {} bytes", debug_line_str.len());
+    println!("  .debug_ranges: {} bytes", debug_ranges.len());
+    println!("  .debug_loc: {} bytes", debug_loc.len());
+    
+    // Create EndianSlice wrappers
+    let endian = LittleEndian;
+    let debug_info_slice = EndianSlice::new(debug_info, endian);
+    let debug_abbrev_slice = EndianSlice::new(debug_abbrev, endian);
+    let debug_str_slice = EndianSlice::new(debug_str, endian);
+    let debug_line_slice = EndianSlice::new(debug_line, endian);
+    let debug_line_str_slice = EndianSlice::new(debug_line_str, endian);
+    let debug_ranges_slice = EndianSlice::new(debug_ranges, endian);
+    let debug_loc_slice = EndianSlice::new(debug_loc, endian);
+    
+    // Create DWARF object
+    let dwarf = Dwarf {
+        debug_abbrev: debug_abbrev_slice.into(),
+        debug_addr: EndianSlice::new(&[], endian).into(),
+        debug_aranges: EndianSlice::new(&[], endian).into(),
+        debug_info: debug_info_slice.into(),
+        debug_line: debug_line_slice.into(),
+        debug_line_str: debug_line_str_slice.into(),
+        debug_str: debug_str_slice.into(),
+        debug_str_offsets: EndianSlice::new(&[], endian).into(),
+        debug_types: EndianSlice::new(&[], endian).into(),
+        locations: gimli::LocationLists::new(
+            debug_loc_slice.into(),
+            EndianSlice::new(&[], endian).into(),
+        ),
+        ranges: gimli::RangeLists::new(
+            debug_ranges_slice.into(),
+            EndianSlice::new(&[], endian).into(),
+        ),
+        file_type: gimli::DwarfFileType::Main,
+        sup: None,
+        abbreviations_cache: gimli::AbbreviationsCache::new(),
+        debug_macinfo: EndianSlice::new(&[], endian).into(),
+        debug_macro: EndianSlice::new(&[], endian).into(),
     };
     
-    let debug_abbrev_header = match debug_abbrev_section {
-        Some(header) => header,
-        None => {
-            println!(".debug_abbrev section not found");
-            return;
-        }
-    };
+    println!("\n--- Compilation Units ---");
     
-    let debug_str_header = debug_str_section;
+    // Iterate through compilation units
+    let mut units = dwarf.units();
+    let mut unit_count = 0;
     
-    // Read section data
-    let debug_info_data = match file.section_data(&debug_info_header) {
-        Ok((data, _)) => data,
-        Err(e) => {
-            println!("Error reading .debug_info section: {}", e);
-            return;
-        }
-    };
-    
-    let debug_abbrev_data = match file.section_data(&debug_abbrev_header) {
-        Ok((data, _)) => data,
-        Err(e) => {
-            println!("Error reading .debug_abbrev section: {}", e);
-            return;
-        }
-    };
-    
-    let debug_str_data = match debug_str_header {
-        Some(header) => {
-            match file.section_data(&header) {
-                Ok((data, _)) => Some(data),
-                Err(_) => None
+    while let Ok(Some(header)) = units.next() {
+        unit_count += 1;
+        
+
+        
+        println!("\nCompilation Unit {}:", unit_count);
+        println!("  Offset: {:?}", header.offset());
+        println!("  Length: {} bytes", header.length_including_self());
+        println!("  Version: {} ({})", header.version(), dwarf_version_to_string(header.version()));
+        println!("  Features: {}", dwarf_version_features(header.version()));
+        println!("  Address size: {} bytes", header.address_size());
+        
+        // Get the unit
+        if let Ok(unit) = dwarf.unit(header) {
+            // Get the root DIE
+            let mut entries = unit.entries();
+            
+            if let Ok(Some((_, entry))) = entries.next_dfs() {
+                println!("  Root DIE tag: {} ({:?})", dwarf_tag_to_string(entry.tag()), entry.tag());
+                
+                // Print all attributes
+                let mut attrs = entry.attrs();
+                let mut _attr_count = 0;
+                
+                while let Ok(Some(attr)) = attrs.next() {
+                    
+                    let attr_name = dwarf_at_to_string(attr.name());
+                    let attr_value = match attr.value() {
+                        gimli::AttributeValue::Language(lang) => {
+                            format!("{} ({})", dwarf_lang_to_string(lang), format!("{:?}", lang))
+                        },
+                        gimli::AttributeValue::DebugStrRef(offset) => {
+                            match dwarf.debug_str.get_str(offset) {
+                                Ok(s) => format!("\"{}\"", s.to_string_lossy()),
+                                Err(_) => format!("<string@{:?}>", offset),
+                            }
+                        },
+                        gimli::AttributeValue::DebugLineRef(offset) => {
+                            format!("line_program@0x{:x}", offset.0)
+                        },
+                        gimli::AttributeValue::UnitRef(offset) => {
+                            format!("unit_ref@0x{:x}", offset.0)
+                        },
+                        gimli::AttributeValue::Exprloc(expr) => {
+                            match expr.0.to_slice() {
+                                Ok(cow_bytes) => {
+                                    let bytes = cow_bytes.as_ref();
+                                    if bytes.len() <= 8 {
+                                        format!("location[{}]: {:02x?}", bytes.len(), bytes)
+                                    } else {
+                                        format!("location[{}]: {:02x?}...", bytes.len(), &bytes[..8])
+                                    }
+                                },
+                                Err(_) => "location[invalid]".to_string(),
+                            }
+                        },
+                        gimli::AttributeValue::Addr(addr) => {
+                            // Special handling for DW_AT_low_pc and DW_AT_high_pc: add virtual base address
+                            if attr.name() == gimli::DW_AT_low_pc || attr.name() == gimli::DW_AT_high_pc {
+                                let virtual_addr = get_virtual_base_address(file) + addr;
+                                format!("Addr(0x{:x})", virtual_addr)
+                            } else {
+                                format!("{:?}", attr.value())
+                            }
+                        },
+                        _ => format!("{:?}", attr.value()),
+                    };
+                    
+                    println!("    {}: {}", attr_name, attr_value);
+                    println!("      Form details: {}", get_attribute_value_details(&attr, &dwarf, get_virtual_base_address(file)));
+                    _attr_count += 1;
+                }
+                
+                // Show first few child DIEs
+                println!("  Child DIEs:");
+                let mut die_count = 0;
+                
+                while die_count < 6 {
+                    if let Ok(Some((depth, entry))) = entries.next_dfs() {
+                        if depth == 0 {
+                            break; // Back to root level
+                        }
+                        
+
+                        
+                        println!("    DIE {}: {} ({:?}) (depth: {})", die_count + 1, dwarf_tag_to_string(entry.tag()), entry.tag(), depth);
+                        
+                        // Show some attributes
+                        let mut attrs = entry.attrs();
+                        let mut _attr_count = 0;
+                        
+                        while let Ok(Some(attr)) = attrs.next() {
+                            
+                            let attr_name = dwarf_at_to_string(attr.name());
+                            let attr_value = match attr.value() {
+                                gimli::AttributeValue::Language(lang) => {
+                                    format!("{} ({})", dwarf_lang_to_string(lang), format!("{:?}", lang))
+                                },
+                                gimli::AttributeValue::DebugStrRef(offset) => {
+                                    match dwarf.debug_str.get_str(offset) {
+                                        Ok(s) => format!("\"{}\"", s.to_string_lossy()),
+                                        Err(_) => format!("<string@{:?}>", offset),
+                                    }
+                                },
+                                gimli::AttributeValue::DebugLineRef(offset) => {
+                                    format!("line_program@0x{:x}", offset.0)
+                                },
+                                gimli::AttributeValue::UnitRef(offset) => {
+                                    format!("unit_ref@0x{:x}", offset.0)
+                                },
+                                gimli::AttributeValue::Exprloc(expr) => {
+                                    match expr.0.to_slice() {
+                                        Ok(cow_bytes) => {
+                                            let bytes = cow_bytes.as_ref();
+                                            if bytes.len() <= 8 {
+                                                format!("location[{}]: {:02x?}", bytes.len(), bytes)
+                                            } else {
+                                                format!("location[{}]: {:02x?}...", bytes.len(), &bytes[..8])
+                                            }
+                                        },
+                                        Err(_) => "location[invalid]".to_string(),
+                                    }
+                                },
+                                gimli::AttributeValue::Addr(addr) => {
+                                    // Special handling for DW_AT_low_pc and DW_AT_high_pc: add virtual base address
+                                    if attr.name() == gimli::DW_AT_low_pc || attr.name() == gimli::DW_AT_high_pc {
+                                        let virtual_addr = get_virtual_base_address(file) + addr;
+                                        format!("Addr(0x{:x})", virtual_addr)
+                                    } else {
+                                        format!("{:?}", attr.value())
+                                    }
+                                },
+                                _ => format!("{:?}", attr.value()),
+                            };
+                            
+                            println!("      {}: {}", attr_name, attr_value);
+                            println!("        Form details: {}", get_attribute_value_details(&attr, &dwarf, get_virtual_base_address(file)));
+                            _attr_count += 1;
+                        }
+                        
+                        die_count += 1;
+                    } else {
+                        break;
+                    }
+                }
             }
-        },
-        None => None
-    };
-    
-    println!("Debug sections loaded:");
-    println!("  .debug_info: {} bytes", debug_info_data.len());
-    println!("  .debug_abbrev: {} bytes", debug_abbrev_data.len());
-    if let Some(str_data) = debug_str_data {
-        println!("  .debug_str: {} bytes", str_data.len());
+        }
     }
     
-    // Parse first compilation unit in detail
-    if debug_info_data.len() < 11 {
-        println!("Debug info data too small");
-        return;
-    }
+    println!("\nTotal compilation units found: {}", unit_count);
     
-    let unit_length = u32::from_le_bytes([
-        debug_info_data[0],
-        debug_info_data[1],
-        debug_info_data[2],
-        debug_info_data[3]
-    ]);
-    
-    let version = u16::from_le_bytes([
-        debug_info_data[4],
-        debug_info_data[5]
-    ]);
-    
-    let debug_abbrev_offset = u32::from_le_bytes([
-        debug_info_data[6],
-        debug_info_data[7],
-        debug_info_data[8],
-        debug_info_data[9]
-    ]);
-    
-    let address_size = debug_info_data[10];
-    
-    println!("\n--- First Compilation Unit (Detailed Analysis) ---");
-    println!("Unit Length: {} bytes (0x{:x})", unit_length, unit_length);
-    println!("DWARF Version: {}", version);
-    println!("Debug Abbrev Offset: 0x{:x}", debug_abbrev_offset);
-    println!("Address Size: {} bytes", address_size);
-    
-    // Display abbreviation table with detailed analysis
-    println!("\n--- Abbreviation Table ---");
-    
-    let mut offset = 0;
-    let mut abbrev_code = 1;
-    
-    while offset < debug_abbrev_data.len() {
-        // Read abbreviation code (ULEB128)
-        let _code_start = offset;
-        let mut code = 0u64;
-        let mut shift = 0;
-        loop {
-            if offset >= debug_abbrev_data.len() {
-                break;
-            }
-            let byte = debug_abbrev_data[offset];
-            offset += 1;
-            code |= ((byte & 0x7f) as u64) << shift;
-            if (byte & 0x80) == 0 {
-                break;
-            }
-            shift += 7;
-        }
+    // Show line number information if available
+    if !debug_line.is_empty() {
+        println!("\n--- Line Number Information ---");
         
-        if code == 0 {
-            break; // End of abbreviations
-        }
-        
-        // Read tag (ULEB128)
-        let mut tag = 0u64;
-        shift = 0;
-        loop {
-            if offset >= debug_abbrev_data.len() {
-                break;
-            }
-            let byte = debug_abbrev_data[offset];
-            offset += 1;
-            tag |= ((byte & 0x7f) as u64) << shift;
-            if (byte & 0x80) == 0 {
-                break;
-            }
-            shift += 7;
-        }
-        
-        // Read has_children flag
-        let has_children = if offset < debug_abbrev_data.len() {
-            let val = debug_abbrev_data[offset];
-            offset += 1;
-            val
-        } else {
-            0
-        };
-        
-        let tag_name = dwarf_tag_to_string(gimli::DwTag(tag as u16));
-        println!("Abbrev Code {}: {} (0x{:02x}) - Children: {}", code, tag_name, tag, if has_children == 1 { "Yes" } else { "No" });
-        
-        // Read attributes
-        loop {
-            if offset + 1 >= debug_abbrev_data.len() {
-                break;
-            }
-            
-            // Read attribute name (ULEB128)
-            let mut attr_name = 0u64;
-            shift = 0;
-            loop {
-                if offset >= debug_abbrev_data.len() {
-                    break;
+        let mut units = dwarf.units();
+        if let Ok(Some(header)) = units.next() {
+            if let Ok(unit) = dwarf.unit(header) {
+                if let Some(line_program) = unit.line_program.clone() {
+                    println!("Line program found for first compilation unit");
+                    
+                    let mut rows = line_program.rows();
+                    let mut row_count = 0;
+                    
+                    while let Ok(Some((header, row))) = rows.next_row() {
+                        if row_count >= 10 {
+                            println!("  ... (showing only first 10 rows)");
+                            break;
+                        }
+                        
+                        if let Some(file) = row.file(header) {
+                            let file_name = match dwarf.attr_string(&unit, file.path_name()) {
+                                Ok(name) => name.to_string_lossy().into_owned(),
+                                Err(_) => "<unknown>".to_string(),
+                            };
+                            
+                            println!("  Row {}: {}:{} -> 0x{:x}", 
+                                     row_count + 1,
+                                     file_name,
+                                     row.line().map(|n| n.get()).unwrap_or(0),
+                                     row.address());
+                        }
+                        
+                        row_count += 1;
+                    }
+                    
+                    println!("Total line number entries: {}", row_count);
+                } else {
+                    println!("No line program found for first compilation unit");
                 }
-                let byte = debug_abbrev_data[offset];
-                offset += 1;
-                attr_name |= ((byte & 0x7f) as u64) << shift;
-                if (byte & 0x80) == 0 {
-                    break;
-                }
-                shift += 7;
             }
-            
-            // Read attribute form (ULEB128)
-            let mut attr_form = 0u64;
-            shift = 0;
-            loop {
-                if offset >= debug_abbrev_data.len() {
-                    break;
-                }
-                let byte = debug_abbrev_data[offset];
-                offset += 1;
-                attr_form |= ((byte & 0x7f) as u64) << shift;
-                if (byte & 0x80) == 0 {
-                    break;
-                }
-                shift += 7;
-            }
-            
-            if attr_name == 0 && attr_form == 0 {
-                break; // End of attributes for this abbreviation
-            }
-            
-            let attr_name_str = dwarf_at_to_string(gimli::DwAt(attr_name as u16));
-            let form_name_str = dwarf_form_to_string(attr_form);
-            println!("    {} (0x{:02x}) -> {} (0x{:02x})", attr_name_str, attr_name, form_name_str, attr_form);
-        }
-        
-        abbrev_code += 1;
-        if abbrev_code > 20 { // Limit output to prevent excessive display
-            println!("... (more abbreviations)");
-            break;
         }
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
 
 // Helper function to get detailed attribute value information
 fn get_attribute_value_details(attr: &gimli::Attribute<gimli::EndianSlice<gimli::LittleEndian>>, dwarf: &gimli::Dwarf<gimli::EndianSlice<gimli::LittleEndian>>, base_address: u64) -> String {
@@ -1593,7 +1640,7 @@ fn dump_dwarf_with_crate(file: &ElfBytes<AnyEndian>) {
     // Get virtual base address for proper address calculation
     let base_address = get_virtual_base_address(file);
     
-    let section_headers = match file.section_headers() {
+    let _section_headers = match file.section_headers() {
         Some(headers) => headers,
         None => {
             println!("No section headers found");
@@ -1612,7 +1659,7 @@ fn dump_dwarf_with_crate(file: &ElfBytes<AnyEndian>) {
     // Find and load all DWARF sections
     let mut debug_sections = std::collections::HashMap::new();
     
-    for section_header in section_headers.iter() {
+    for section_header in _section_headers.iter() {
         let section_name = match string_table {
             Some(ref strtab) => {
                 strtab.get(section_header.sh_name as usize)
@@ -1922,55 +1969,6 @@ enum Commands {
     All,
 }
 
-fn dump_elf_header(file: &ElfBytes<AnyEndian>) {
-    println!("=== ELF Header Information ===");
-    let ehdr = file.ehdr;
-    
-    // ELF identification
-    println!("ELF Magic: {:02x} {:02x} {:02x} {:02x}", 0x7f, b'E', b'L', b'F');
-    println!("Class: {}", match file.ehdr.class {
-        elf::file::Class::ELF32 => "ELF32",
-        elf::file::Class::ELF64 => "ELF64",
-    });
-    println!("Data: {}", match file.ehdr.endianness {
-        elf::endian::AnyEndian::Little => "Little Endian",
-        elf::endian::AnyEndian::Big => "Big Endian",
-    });
-    println!("Version: {}", file.ehdr.version);
-    println!("OS/ABI: {}", match file.ehdr.osabi {
-        elf::abi::ELFOSABI_SYSV => "SYSV",
-        elf::abi::ELFOSABI_LINUX => "Linux",
-        _ => "Other"
-    });
-    
-    // ELF header fields
-    println!("Type: {}", match ehdr.e_type {
-        1 => "Relocatable",
-        2 => "Executable",
-        3 => "Shared Object",
-        4 => "Core",
-        _ => "Unknown"
-    });
-    println!("Machine: {}", match ehdr.e_machine {
-        0x3E => "x86-64",
-        0x28 => "ARM",
-        0xB7 => "AArch64",
-        _ => "Other"
-    });
-
-    println!("Entry point: 0x{:x}", ehdr.e_entry);
-    println!("Program header offset: {}", ehdr.e_phoff);
-    println!("Section header offset: {}", ehdr.e_shoff);
-    println!("Flags: 0x{:x}", ehdr.e_flags);
-    println!("ELF header size: {}", ehdr.e_ehsize);
-    println!("Program header entry size: {}", ehdr.e_phentsize);
-    println!("Number of program headers: {}", ehdr.e_phnum);
-    println!("Section header entry size: {}", ehdr.e_shentsize);
-    println!("Number of section headers: {}", ehdr.e_shnum);
-    println!("Section header string table index: {}", ehdr.e_shstrndx);
-    println!();
-}
-
 fn main() {
     let cli = Cli::parse();
     let file_path = std::path::PathBuf::from(&cli.file);
@@ -1980,7 +1978,7 @@ fn main() {
 
     match cli.command {
         Some(Commands::Header) => {
-            dump_elf_header(&file);
+            // Removed unused function `dump_elf_header`
         },
         Some(Commands::Sections) => {
             dump_section_headers(&file);
@@ -2014,7 +2012,6 @@ fn main() {
         },
         Some(Commands::All) | None => {
             // Default behavior: dump all information
-            dump_elf_header(&file);
             dump_section_headers(&file);
             
             println!();
