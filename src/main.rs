@@ -14,9 +14,22 @@ fn get_virtual_base_address(file: &ElfBytes<AnyEndian>) -> u64 {
             }
         }
     }
-    
     // Fallback: try to get entry point from ELF header
     file.ehdr.e_entry
+}
+
+// Provide concise details of a DWARF attribute for diagnostics
+fn get_attribute_value_details(
+    attr: &gimli::Attribute<EndianSlice<LittleEndian>>,
+    _dwarf: &gimli::Dwarf<EndianSlice<LittleEndian>>,
+    _base_address: u64,
+) -> String {
+    // Keep it simple yet informative; avoid heavy dereferencing
+    format!(
+        "name={:?}, raw={:?}",
+        attr.name(),
+        attr.value()
+    )
 }
 
 fn dwarf_version_to_string(version: u16) -> &'static str {
@@ -1284,7 +1297,9 @@ fn dump_dwarf_detailed(file: &ElfBytes<AnyEndian>) {
     let debug_line = debug_sections.get(".debug_line").copied().unwrap_or(&[]);
     let debug_line_str = debug_sections.get(".debug_line_str").copied().unwrap_or(&[]);
     let debug_ranges = debug_sections.get(".debug_ranges").copied().unwrap_or(&[]);
+    let debug_rnglists = debug_sections.get(".debug_rnglists").copied().unwrap_or(&[]);
     let debug_loc = debug_sections.get(".debug_loc").copied().unwrap_or(&[]);
+    let debug_loclists = debug_sections.get(".debug_loclists").copied().unwrap_or(&[]);
     
     println!("Section sizes:");
     println!("  .debug_info: {} bytes", debug_info.len());
@@ -1293,7 +1308,9 @@ fn dump_dwarf_detailed(file: &ElfBytes<AnyEndian>) {
     println!("  .debug_line: {} bytes", debug_line.len());
     println!("  .debug_line_str: {} bytes", debug_line_str.len());
     println!("  .debug_ranges: {} bytes", debug_ranges.len());
+    println!("  .debug_rnglists: {} bytes", debug_rnglists.len());
     println!("  .debug_loc: {} bytes", debug_loc.len());
+    println!("  .debug_loclists: {} bytes", debug_loclists.len());
     
     // Create EndianSlice wrappers
     let endian = LittleEndian;
@@ -1303,7 +1320,9 @@ fn dump_dwarf_detailed(file: &ElfBytes<AnyEndian>) {
     let debug_line_slice = EndianSlice::new(debug_line, endian);
     let debug_line_str_slice = EndianSlice::new(debug_line_str, endian);
     let debug_ranges_slice = EndianSlice::new(debug_ranges, endian);
+    let debug_rnglists_slice = EndianSlice::new(debug_rnglists, endian);
     let debug_loc_slice = EndianSlice::new(debug_loc, endian);
+    let debug_loclists_slice = EndianSlice::new(debug_loclists, endian);
     
     // Create DWARF object
     let dwarf = Dwarf {
@@ -1318,11 +1337,11 @@ fn dump_dwarf_detailed(file: &ElfBytes<AnyEndian>) {
         debug_types: EndianSlice::new(&[], endian).into(),
         locations: gimli::LocationLists::new(
             debug_loc_slice.into(),
-            EndianSlice::new(&[], endian).into(),
+            debug_loclists_slice.into(),
         ),
         ranges: gimli::RangeLists::new(
             debug_ranges_slice.into(),
-            EndianSlice::new(&[], endian).into(),
+            debug_rnglists_slice.into(),
         ),
         file_type: gimli::DwarfFileType::Main,
         sup: None,
@@ -1339,597 +1358,172 @@ fn dump_dwarf_detailed(file: &ElfBytes<AnyEndian>) {
     
     while let Ok(Some(header)) = units.next() {
         unit_count += 1;
-        
-
-        
         println!("\nCompilation Unit {}:", unit_count);
         println!("  Offset: {:?}", header.offset());
         println!("  Length: {} bytes", header.length_including_self());
         println!("  Version: {} ({})", header.version(), dwarf_version_to_string(header.version()));
         println!("  Features: {}", dwarf_version_features(header.version()));
         println!("  Address size: {} bytes", header.address_size());
-        
-        // Get the unit
+
+        let base_address = get_virtual_base_address(file);
         if let Ok(unit) = dwarf.unit(header) {
-            // Get the root DIE
             let mut entries = unit.entries();
-            
             if let Ok(Some((_, entry))) = entries.next_dfs() {
                 println!("  Root DIE tag: {} ({:?})", dwarf_tag_to_string(entry.tag()), entry.tag());
-                
-                // Print all attributes
+                // Root DIE attributes
+                let low_pc_abs: Option<u64> = match entry.attr_value(gimli::DW_AT_low_pc) {
+                    Ok(Some(gimli::AttributeValue::Addr(a))) => Some(base_address + a),
+                    _ => None,
+                };
                 let mut attrs = entry.attrs();
-                let mut _attr_count = 0;
-                
                 while let Ok(Some(attr)) = attrs.next() {
-                    
+                    if attr.name() == gimli::DW_AT_ranges && header.version() != 5 { continue; }
                     let attr_name = dwarf_at_to_string(attr.name());
-                    let attr_value = match attr.value() {
-                        gimli::AttributeValue::Language(lang) => {
-                            format!("{} ({})", dwarf_lang_to_string(lang), format!("{:?}", lang))
+                    let attr_value = if attr.name() == gimli::DW_AT_ranges {
+                        format!("ranges: {:?}", attr.value())
+                    } else if attr.name() == gimli::DW_AT_name {
+                        match attr.value() {
+                            gimli::AttributeValue::String(s) => format!("\"{}\" (inline)", s.to_string_lossy()),
+                            gimli::AttributeValue::DebugStrRef(offset) => match dwarf.debug_str.get_str(offset) {
+                                Ok(s) => format!("\"{}\" (strp)", s.to_string_lossy()),
+                                Err(_) => format!("<string@{:?}> (strp)", offset),
+                            },
+                            gimli::AttributeValue::DebugLineStrRef(offset) => match dwarf.debug_line_str.get_str(offset) {
+                                Ok(s) => format!("\"{}\" (line_strp)", s.to_string_lossy()),
+                                Err(_) => format!("<line_string@0x{:x}> (line_strp)", offset.0),
+                            },
+                            _ => format!("{:?}", attr.value()),
+                        }
+                    } else { match attr.value() {
+                        gimli::AttributeValue::Language(lang) => format!("{} ({:?})", dwarf_lang_to_string(lang), lang),
+                        gimli::AttributeValue::DebugStrRef(offset) => match dwarf.debug_str.get_str(offset) {
+                            Ok(s) => format!("\"{}\"", s.to_string_lossy()),
+                            Err(_) => format!("<string@{:?}>", offset),
                         },
-                        gimli::AttributeValue::DebugStrRef(offset) => {
-                            match dwarf.debug_str.get_str(offset) {
-                                Ok(s) => format!("\"{}\"", s.to_string_lossy()),
-                                Err(_) => format!("<string@{:?}>", offset),
-                            }
-                        },
-                        gimli::AttributeValue::DebugLineRef(offset) => {
-                            format!("line_program@0x{:x}", offset.0)
-                        },
-                        gimli::AttributeValue::UnitRef(offset) => {
-                            format!("unit_ref@0x{:x}", offset.0)
-                        },
-                        gimli::AttributeValue::Exprloc(expr) => {
-                            match expr.0.to_slice() {
-                                Ok(cow_bytes) => {
-                                    let bytes = cow_bytes.as_ref();
-                                    if bytes.len() <= 8 {
-                                        format!("location[{}]: {:02x?}", bytes.len(), bytes)
-                                    } else {
-                                        format!("location[{}]: {:02x?}...", bytes.len(), &bytes[..8])
-                                    }
-                                },
-                                Err(_) => "location[invalid]".to_string(),
-                            }
+                        gimli::AttributeValue::DebugLineRef(offset) => format!("line_program@0x{:x}", offset.0),
+                        gimli::AttributeValue::UnitRef(offset) => format!("unit_ref@0x{:x}", offset.0),
+                        gimli::AttributeValue::Exprloc(expr) => match expr.0.to_slice() {
+                            Ok(cow_bytes) => { let bytes = cow_bytes.as_ref(); if bytes.len() <= 8 { format!("location[{}]: {:02x?}", bytes.len(), bytes) } else { format!("location[{}]: {:02x?}...", bytes.len(), &bytes[..8]) } },
+                            Err(_) => "location[invalid]".to_string(),
                         },
                         gimli::AttributeValue::Addr(addr) => {
-                            // Special handling for DW_AT_low_pc and DW_AT_high_pc: add virtual base address
-                            if attr.name() == gimli::DW_AT_low_pc || attr.name() == gimli::DW_AT_high_pc {
-                                let virtual_addr = get_virtual_base_address(file) + addr;
-                                format!("Addr(0x{:x})", virtual_addr)
-                            } else {
-                                format!("{:?}", attr.value())
-                            }
-                        },
+                            if attr.name() == gimli::DW_AT_low_pc || attr.name() == gimli::DW_AT_high_pc { format!("Addr(0x{:x})", base_address + addr) } else { format!("{:?}", attr.value()) }
+                        }
+                        gimli::AttributeValue::Udata(off) if attr.name() == gimli::DW_AT_high_pc => {
+                            if let Some(low) = low_pc_abs { format!("Addr(0x{:x})", low.saturating_add(off as u64)) } else { format!("Udata({})", off) }
+                        }
                         _ => format!("{:?}", attr.value()),
-                    };
-                    
+                    }};
                     println!("    {}: {}", attr_name, attr_value);
-                    println!("      Form details: {}", get_attribute_value_details(&attr, &dwarf, get_virtual_base_address(file)));
-                    _attr_count += 1;
+                    println!("      Form details: {}", get_attribute_value_details(&attr, &dwarf, base_address));
                 }
-                
-                // Show first few child DIEs
-                println!("  Child DIEs:");
-                let mut die_count = 0;
-                
-                while die_count < 6 {
-                    if let Ok(Some((depth, entry))) = entries.next_dfs() {
-                        if depth == 0 {
-                            break; // Back to root level
-                        }
-                        
 
-                        
-                        println!("    DIE {}: {} ({:?}) (depth: {})", die_count + 1, dwarf_tag_to_string(entry.tag()), entry.tag(), depth);
-                        
-                        // Show some attributes
-                        let mut attrs = entry.attrs();
-                        let mut _attr_count = 0;
-                        
-                        while let Ok(Some(attr)) = attrs.next() {
-                            
-                            let attr_name = dwarf_at_to_string(attr.name());
-                            let attr_value = match attr.value() {
-                                gimli::AttributeValue::Language(lang) => {
-                                    format!("{} ({})", dwarf_lang_to_string(lang), format!("{:?}", lang))
-                                },
-                                gimli::AttributeValue::DebugStrRef(offset) => {
-                                    match dwarf.debug_str.get_str(offset) {
-                                        Ok(s) => format!("\"{}\"", s.to_string_lossy()),
-                                        Err(_) => format!("<string@{:?}>", offset),
-                                    }
-                                },
-                                gimli::AttributeValue::DebugLineRef(offset) => {
-                                    format!("line_program@0x{:x}", offset.0)
-                                },
-                                gimli::AttributeValue::UnitRef(offset) => {
-                                    format!("unit_ref@0x{:x}", offset.0)
-                                },
-                                gimli::AttributeValue::Exprloc(expr) => {
-                                    match expr.0.to_slice() {
-                                        Ok(cow_bytes) => {
-                                            let bytes = cow_bytes.as_ref();
-                                            if bytes.len() <= 8 {
-                                                format!("location[{}]: {:02x?}", bytes.len(), bytes)
-                                            } else {
-                                                format!("location[{}]: {:02x?}...", bytes.len(), &bytes[..8])
-                                            }
-                                        },
-                                        Err(_) => "location[invalid]".to_string(),
-                                    }
-                                },
-                                gimli::AttributeValue::Addr(addr) => {
-                                    // Special handling for DW_AT_low_pc and DW_AT_high_pc: add virtual base address
-                                    if attr.name() == gimli::DW_AT_low_pc || attr.name() == gimli::DW_AT_high_pc {
-                                        let virtual_addr = get_virtual_base_address(file) + addr;
-                                        format!("Addr(0x{:x})", virtual_addr)
-                                    } else {
-                                        format!("{:?}", attr.value())
-                                    }
-                                },
-                                _ => format!("{:?}", attr.value()),
-                            };
-                            
-                            println!("      {}: {}", attr_name, attr_value);
-                            println!("        Form details: {}", get_attribute_value_details(&attr, &dwarf, get_virtual_base_address(file)));
-                            _attr_count += 1;
-                        }
-                        
-                        die_count += 1;
-                    } else {
-                        break;
+                // Ranges for root DIE (DWARF5)
+                if header.version() == 5 {
+                    let mut decoded = Vec::new();
+                    if let Ok(mut ranges) = dwarf.die_ranges(&unit, &entry) {
+                        while let Ok(Some(range)) = ranges.next() { decoded.push((range.begin, range.end)); }
+                    }
+                    if !decoded.is_empty() {
+                        println!("    DW_AT_ranges (decoded):");
+                        for (b, e) in decoded { println!("      [0x{:x}..0x{:x}] (virt: 0x{:x}..0x{:x})", b, e, base_address + b, base_address + e); }
                     }
                 }
-            }
-        }
-    }
-    
-    println!("\nTotal compilation units found: {}", unit_count);
-    
-    // Show line number information if available
-    if !debug_line.is_empty() {
-        println!("\n--- Line Number Information ---");
-        
-        let mut units = dwarf.units();
-        if let Ok(Some(header)) = units.next() {
-            if let Ok(unit) = dwarf.unit(header) {
-                if let Some(line_program) = unit.line_program.clone() {
-                    println!("Line program found for first compilation unit");
-                    
-                    let mut rows = line_program.rows();
-                    let mut row_count = 0;
-                    
-                    while let Ok(Some((header, row))) = rows.next_row() {
-                        if row_count >= 10 {
-                            println!("  ... (showing only first 10 rows)");
-                            break;
+
+                // Direct children only
+                println!("  Child DIEs (direct children):");
+                let mut die_count = 0;
+                while let Ok(Some((depth, entry))) = entries.next_dfs() {
+                    if depth == 0 { break; }
+                    if depth != 1 { continue; }
+                    println!("    DIE {}: {} ({:?}) (depth: {})", die_count + 1, dwarf_tag_to_string(entry.tag()), entry.tag(), depth);
+                    let low_pc_abs: Option<u64> = match entry.attr_value(gimli::DW_AT_low_pc) {
+                        Ok(Some(gimli::AttributeValue::Addr(a))) => Some(base_address + a),
+                        _ => None,
+                    };
+                    let mut attrs = entry.attrs();
+                    while let Ok(Some(attr)) = attrs.next() {
+                        if attr.name() == gimli::DW_AT_ranges && header.version() != 5 { continue; }
+                        let attr_name = dwarf_at_to_string(attr.name());
+                        let attr_value = if attr.name() == gimli::DW_AT_ranges {
+                            format!("ranges: {:?}", attr.value())
+                        } else if attr.name() == gimli::DW_AT_name {
+                            match attr.value() {
+                                gimli::AttributeValue::String(s) => format!("\"{}\" (inline)", s.to_string_lossy()),
+                                gimli::AttributeValue::DebugStrRef(offset) => match dwarf.debug_str.get_str(offset) {
+                                    Ok(s) => format!("\"{}\" (strp)", s.to_string_lossy()),
+                                    Err(_) => format!("<string@{:?}> (strp)", offset),
+                                },
+                                gimli::AttributeValue::DebugLineStrRef(offset) => match dwarf.debug_line_str.get_str(offset) {
+                                    Ok(s) => format!("\"{}\" (line_strp)", s.to_string_lossy()),
+                                    Err(_) => format!("<line_string@0x{:x}> (line_strp)", offset.0),
+                                },
+                                _ => format!("{:?}", attr.value()),
+                            }
+                        } else { match attr.value() {
+                            gimli::AttributeValue::Language(lang) => format!("{} ({:?})", dwarf_lang_to_string(lang), lang),
+                            gimli::AttributeValue::DebugStrRef(offset) => match dwarf.debug_str.get_str(offset) {
+                                Ok(s) => format!("\"{}\"", s.to_string_lossy()),
+                                Err(_) => format!("<string@{:?}>", offset),
+                            },
+                            gimli::AttributeValue::DebugLineRef(offset) => format!("line_program@0x{:x}", offset.0),
+                            gimli::AttributeValue::UnitRef(offset) => format!("unit_ref@0x{:x}", offset.0),
+                            gimli::AttributeValue::Exprloc(expr) => match expr.0.to_slice() {
+                                Ok(cow_bytes) => { let bytes = cow_bytes.as_ref(); if bytes.len() <= 8 { format!("location[{}]: {:02x?}", bytes.len(), bytes) } else { format!("location[{}]: {:02x?}...", bytes.len(), &bytes[..8]) } },
+                                Err(_) => "location[invalid]".to_string(),
+                            },
+                            gimli::AttributeValue::Addr(addr) => {
+                                if attr.name() == gimli::DW_AT_low_pc || attr.name() == gimli::DW_AT_high_pc { format!("Addr(0x{:x})", base_address + addr) } else { format!("{:?}", attr.value()) }
+                            }
+                            gimli::AttributeValue::Udata(off) if attr.name() == gimli::DW_AT_high_pc => {
+                                if let Some(low) = low_pc_abs { format!("Addr(0x{:x})", low.saturating_add(off as u64)) } else { format!("Udata({})", off) }
+                            }
+                            _ => format!("{:?}", attr.value()),
+                        }};
+                        println!("      {}: {}", attr_name, attr_value);
+                        println!("        Form details: {}", get_attribute_value_details(&attr, &dwarf, base_address));
+                    }
+                    // Ranges for child (DWARF5)
+                    if header.version() == 5 {
+                        let mut decoded = Vec::new();
+                        if let Ok(mut ranges) = dwarf.die_ranges(&unit, &entry) {
+                            while let Ok(Some(range)) = ranges.next() { decoded.push((range.begin, range.end)); }
                         }
-                        
+                        if !decoded.is_empty() {
+                            println!("      DW_AT_ranges (decoded):");
+                            for (b, e) in decoded { println!("        [0x{:x}..0x{:x}] (virt: 0x{:x}..0x{:x})", b, e, base_address + b, base_address + e); }
+                        }
+                    }
+                    die_count += 1;
+                }
+
+                // Line number info for this unit
+                if let Some(line_program) = unit.line_program.clone() {
+                    println!("\n--- Line Number Information (this unit) ---");
+                    let mut rows = line_program.rows();
+                    let mut row_count: u64 = 0;
+                    while let Ok(Some((header, row))) = rows.next_row() {
                         if let Some(file) = row.file(header) {
                             let file_name = match dwarf.attr_string(&unit, file.path_name()) {
                                 Ok(name) => name.to_string_lossy().into_owned(),
                                 Err(_) => "<unknown>".to_string(),
                             };
-                            
-                            println!("  Row {}: {}:{} -> 0x{:x}", 
-                                     row_count + 1,
-                                     file_name,
-                                     row.line().map(|n| n.get()).unwrap_or(0),
-                                     row.address());
+                            println!("  Row {}: {}:{} -> 0x{:x}", row_count + 1, file_name, row.line().map(|n| n.get()).unwrap_or(0), row.address());
                         }
-                        
                         row_count += 1;
                     }
-                    
-                    println!("Total line number entries: {}", row_count);
+                    println!("  Total line number entries in this unit: {}", row_count);
                 } else {
-                    println!("No line program found for first compilation unit");
+                    println!("\n--- Line Number Information (this unit) ---\n  No line program");
                 }
             }
         }
-    }
-}
-
-// Helper function to get detailed attribute value information
-fn get_attribute_value_details(attr: &gimli::Attribute<gimli::EndianSlice<gimli::LittleEndian>>, dwarf: &gimli::Dwarf<gimli::EndianSlice<gimli::LittleEndian>>, base_address: u64) -> String {
-    // Special handling for DW_AT_name attribute
-    if attr.name() == gimli::DW_AT_name {
-        match attr.value() {
-            gimli::AttributeValue::String(string) => {
-                return format!("Name (inline): \"{}\" (DW_FORM_string)", string.to_string_lossy());
-            },
-            gimli::AttributeValue::DebugStrRef(offset) => {
-                match dwarf.debug_str.get_str(offset) {
-                    Ok(s) => return format!("Name (reference): \"{}\" (DW_FORM_strp)", s.to_string_lossy()),
-                    Err(_) => return format!("Name (reference): <invalid@{:?}> (DW_FORM_strp)", offset),
-                }
-            },
-            gimli::AttributeValue::DebugLineStrRef(offset) => {
-                match dwarf.debug_line_str.get_str(offset) {
-                    Ok(s) => return format!("Name (line string): \"{}\" (DW_FORM_line_strp)", s.to_string_lossy()),
-                    Err(_) => return format!("Name (line string): <invalid@0x{:x}> (DW_FORM_line_strp)", offset.0),
-                }
-            },
-            _ => {}
-        }
-    }
-    
-    match attr.value() {
-        gimli::AttributeValue::Addr(addr) => {
-            // Special handling for DW_AT_low_pc and DW_AT_high_pc: add virtual base address
-            if attr.name() == gimli::DW_AT_low_pc || attr.name() == gimli::DW_AT_high_pc {
-                let virtual_addr = base_address + addr;
-                format!("Address: 0x{:x} (0x{:x} + 0x{:x}) (DW_FORM_addr)", virtual_addr, base_address, addr)
-            } else {
-                format!("Address: 0x{:x} (DW_FORM_addr)", addr)
-            }
-        },
-        gimli::AttributeValue::Block(block) => {
-            format!("Block: {} bytes (DW_FORM_block*)", block.len())
-        },
-        gimli::AttributeValue::Data1(data) => {
-            format!("Data1: {} (DW_FORM_data1)", data)
-        },
-        gimli::AttributeValue::Data2(data) => {
-            format!("Data2: {} (DW_FORM_data2)", data)
-        },
-        gimli::AttributeValue::Data4(data) => {
-            format!("Data4: {} (DW_FORM_data4)", data)
-        },
-        gimli::AttributeValue::Data8(data) => {
-            format!("Data8: {} (DW_FORM_data8)", data)
-        },
-        gimli::AttributeValue::Sdata(data) => {
-            format!("Signed data: {} (DW_FORM_sdata)", data)
-        },
-        gimli::AttributeValue::Udata(data) => {
-            format!("Unsigned data: {} (DW_FORM_udata)", data)
-        },
-        gimli::AttributeValue::String(string) => {
-            format!("Inline string: \"{}\" (DW_FORM_string)", string.to_string_lossy())
-        },
-        gimli::AttributeValue::DebugStrRef(offset) => {
-            match dwarf.debug_str.get_str(offset) {
-                Ok(s) => format!("String reference: \"{}\" (DW_FORM_strp)", s.to_string_lossy()),
-                Err(_) => format!("String reference: <invalid@{:?}> (DW_FORM_strp)", offset),
-            }
-        },
-        gimli::AttributeValue::DebugLineStrRef(offset) => {
-            match dwarf.debug_line_str.get_str(offset) {
-                Ok(s) => format!("Line string reference: \"{}\" (DW_FORM_line_strp)", s.to_string_lossy()),
-                Err(_) => format!("Line string reference: <invalid@0x{:x}> (DW_FORM_line_strp)", offset.0),
-            }
-        },
-        gimli::AttributeValue::Flag(flag) => {
-            format!("Flag: {} (DW_FORM_flag)", flag)
-        },
-
-        gimli::AttributeValue::UnitRef(_) => {
-            "Unit reference (DW_FORM_ref*)".to_string()
-        },
-        gimli::AttributeValue::DebugInfoRef(_) => {
-            "Debug info reference (DW_FORM_ref_addr)".to_string()
-        },
-        gimli::AttributeValue::DebugLineRef(_) => {
-            "Line program reference (DW_FORM_sec_offset)".to_string()
-        },
-        gimli::AttributeValue::Exprloc(expr) => {
-            match expr.0.to_slice() {
-                Ok(cow_bytes) => {
-                    let bytes = cow_bytes.as_ref();
-                    format!("Expression location: {} bytes (DW_FORM_exprloc)", bytes.len())
-                },
-                Err(_) => "Invalid expression location (DW_FORM_exprloc)".to_string(),
-            }
-        },
-        gimli::AttributeValue::Language(_) => {
-            "Language code (DW_FORM_data1)".to_string()
-        },
-        gimli::AttributeValue::Encoding(_) => {
-            "Encoding (DW_FORM_data1)".to_string()
-        },
-        _ => "Unknown attribute value".to_string(),
     }
 }
 
 fn dump_dwarf_with_crate(file: &ElfBytes<AnyEndian>) {
-    println!("\n=== DWARF Analysis with dwarf crate ===");
-    
-    // Get virtual base address for proper address calculation
-    let base_address = get_virtual_base_address(file);
-    
-    let _section_headers = match file.section_headers() {
-        Some(headers) => headers,
-        None => {
-            println!("No section headers found");
-            return;
-        }
-    };
-    
-    let string_table = match file.section_headers_with_strtab() {
-        Ok((_, strtab)) => strtab,
-        Err(_) => {
-            println!("Could not read string table");
-            return;
-        }
-    };
-    
-    // Find and load all DWARF sections
-    let mut debug_sections = std::collections::HashMap::new();
-    
-    for section_header in _section_headers.iter() {
-        let section_name = match string_table {
-            Some(ref strtab) => {
-                strtab.get(section_header.sh_name as usize)
-                    .unwrap_or("<invalid>")
-            },
-            None => "<no-strtab>"
-        };
-        
-        if section_name.starts_with(".debug_") {
-            if let Ok((data, _)) = file.section_data(&section_header) {
-                debug_sections.insert(section_name.to_string(), data);
-            }
-        }
-    }
-    
-    println!("Found {} debug sections", debug_sections.len());
-    
-    // Create DWARF object using the dwarf crate
-    let debug_info = debug_sections.get(".debug_info").copied().unwrap_or(&[]);
-    let debug_abbrev = debug_sections.get(".debug_abbrev").copied().unwrap_or(&[]);
-    let debug_str = debug_sections.get(".debug_str").copied().unwrap_or(&[]);
-    let debug_line = debug_sections.get(".debug_line").copied().unwrap_or(&[]);
-    let debug_line_str = debug_sections.get(".debug_line_str").copied().unwrap_or(&[]);
-    let debug_ranges = debug_sections.get(".debug_ranges").copied().unwrap_or(&[]);
-    let debug_loc = debug_sections.get(".debug_loc").copied().unwrap_or(&[]);
-    
-    println!("Section sizes:");
-    println!("  .debug_info: {} bytes", debug_info.len());
-    println!("  .debug_abbrev: {} bytes", debug_abbrev.len());
-    println!("  .debug_str: {} bytes", debug_str.len());
-    println!("  .debug_line: {} bytes", debug_line.len());
-    println!("  .debug_line_str: {} bytes", debug_line_str.len());
-    println!("  .debug_ranges: {} bytes", debug_ranges.len());
-    println!("  .debug_loc: {} bytes", debug_loc.len());
-    
-    // Create EndianSlice wrappers
-    let endian = LittleEndian;
-    let debug_info_slice = EndianSlice::new(debug_info, endian);
-    let debug_abbrev_slice = EndianSlice::new(debug_abbrev, endian);
-    let debug_str_slice = EndianSlice::new(debug_str, endian);
-    let debug_line_slice = EndianSlice::new(debug_line, endian);
-    let debug_line_str_slice = EndianSlice::new(debug_line_str, endian);
-    let debug_ranges_slice = EndianSlice::new(debug_ranges, endian);
-    let debug_loc_slice = EndianSlice::new(debug_loc, endian);
-    
-    // Create DWARF object
-    let dwarf = Dwarf {
-        debug_abbrev: debug_abbrev_slice.into(),
-        debug_addr: EndianSlice::new(&[], endian).into(),
-        debug_aranges: EndianSlice::new(&[], endian).into(),
-        debug_info: debug_info_slice.into(),
-        debug_line: debug_line_slice.into(),
-        debug_line_str: debug_line_str_slice.into(),
-        debug_str: debug_str_slice.into(),
-        debug_str_offsets: EndianSlice::new(&[], endian).into(),
-        debug_types: EndianSlice::new(&[], endian).into(),
-        locations: gimli::LocationLists::new(
-            debug_loc_slice.into(),
-            EndianSlice::new(&[], endian).into(),
-        ),
-        ranges: gimli::RangeLists::new(
-            debug_ranges_slice.into(),
-            EndianSlice::new(&[], endian).into(),
-        ),
-        file_type: gimli::DwarfFileType::Main,
-        sup: None,
-        abbreviations_cache: gimli::AbbreviationsCache::new(),
-        debug_macinfo: EndianSlice::new(&[], endian).into(),
-        debug_macro: EndianSlice::new(&[], endian).into(),
-    };
-    
-    println!("\n--- Compilation Units ---");
-    
-    // Iterate through compilation units
-    let mut units = dwarf.units();
-    let mut unit_count = 0;
-    
-    while let Ok(Some(header)) = units.next() {
-        unit_count += 1;
-        
-
-        
-        println!("\nCompilation Unit {}:", unit_count);
-        println!("  Offset: {:?}", header.offset());
-        println!("  Length: {} bytes", header.length_including_self());
-        println!("  Version: {} ({})", header.version(), dwarf_version_to_string(header.version()));
-        println!("  Features: {}", dwarf_version_features(header.version()));
-        println!("  Address size: {} bytes", header.address_size());
-        
-        // Get the unit
-        if let Ok(unit) = dwarf.unit(header) {
-            // Get the root DIE
-            let mut entries = unit.entries();
-            
-            if let Ok(Some((_, entry))) = entries.next_dfs() {
-                println!("  Root DIE tag: {} ({:?})", dwarf_tag_to_string(entry.tag()), entry.tag());
-                
-                // Print all attributes
-                let mut attrs = entry.attrs();
-                let mut _attr_count = 0;
-                
-                while let Ok(Some(attr)) = attrs.next() {
-                    
-                    let attr_name = dwarf_at_to_string(attr.name());
-                    let attr_value = match attr.value() {
-                        gimli::AttributeValue::Language(lang) => {
-                            format!("{} ({})", dwarf_lang_to_string(lang), format!("{:?}", lang))
-                        },
-                        gimli::AttributeValue::DebugStrRef(offset) => {
-                            match dwarf.debug_str.get_str(offset) {
-                                Ok(s) => format!("\"{}\"", s.to_string_lossy()),
-                                Err(_) => format!("<string@{:?}>", offset),
-                            }
-                        },
-                        gimli::AttributeValue::DebugLineRef(offset) => {
-                            format!("line_program@0x{:x}", offset.0)
-                        },
-                        gimli::AttributeValue::UnitRef(offset) => {
-                            format!("unit_ref@0x{:x}", offset.0)
-                        },
-                        gimli::AttributeValue::Exprloc(expr) => {
-                            match expr.0.to_slice() {
-                                Ok(cow_bytes) => {
-                                    let bytes = cow_bytes.as_ref();
-                                    if bytes.len() <= 8 {
-                                        format!("location[{}]: {:02x?}", bytes.len(), bytes)
-                                    } else {
-                                        format!("location[{}]: {:02x?}...", bytes.len(), &bytes[..8])
-                                    }
-                                },
-                                Err(_) => "location[invalid]".to_string(),
-                            }
-                        },
-                        gimli::AttributeValue::Addr(addr) => {
-                            // Special handling for DW_AT_low_pc and DW_AT_high_pc: add virtual base address
-                            if attr.name() == gimli::DW_AT_low_pc || attr.name() == gimli::DW_AT_high_pc {
-                                let virtual_addr = base_address + addr;
-                                format!("Addr(0x{:x})", virtual_addr)
-                            } else {
-                                format!("{:?}", attr.value())
-                            }
-                        },
-                        _ => format!("{:?}", attr.value()),
-                    };
-                    
-                    println!("    {}: {}", attr_name, attr_value);
-                    println!("      Form details: {}", get_attribute_value_details(&attr, &dwarf, base_address));
-                    _attr_count += 1;
-                }
-                
-                // Show first few child DIEs
-                println!("  Child DIEs:");
-                let mut die_count = 0;
-                
-                while die_count < 6 {
-                    if let Ok(Some((depth, entry))) = entries.next_dfs() {
-                        if depth == 0 {
-                            break; // Back to root level
-                        }
-                        
-
-                        
-                        println!("    DIE {}: {} ({:?}) (depth: {})", die_count + 1, dwarf_tag_to_string(entry.tag()), entry.tag(), depth);
-                        
-                        // Show some attributes
-                        let mut attrs = entry.attrs();
-                        let mut _attr_count = 0;
-                        
-                        while let Ok(Some(attr)) = attrs.next() {
-                            
-                            let attr_name = dwarf_at_to_string(attr.name());
-                            let attr_value = match attr.value() {
-                                gimli::AttributeValue::Language(lang) => {
-                                    format!("{} ({})", dwarf_lang_to_string(lang), format!("{:?}", lang))
-                                },
-                                gimli::AttributeValue::DebugStrRef(offset) => {
-                                    match dwarf.debug_str.get_str(offset) {
-                                        Ok(s) => format!("\"{}\"", s.to_string_lossy()),
-                                        Err(_) => format!("<string@{:?}>", offset),
-                                    }
-                                },
-                                gimli::AttributeValue::DebugLineRef(offset) => {
-                                    format!("line_program@0x{:x}", offset.0)
-                                },
-                                gimli::AttributeValue::UnitRef(offset) => {
-                                    format!("unit_ref@0x{:x}", offset.0)
-                                },
-                                gimli::AttributeValue::Exprloc(expr) => {
-                                    match expr.0.to_slice() {
-                                        Ok(cow_bytes) => {
-                                            let bytes = cow_bytes.as_ref();
-                                            if bytes.len() <= 8 {
-                                                format!("location[{}]: {:02x?}", bytes.len(), bytes)
-                                            } else {
-                                                format!("location[{}]: {:02x?}...", bytes.len(), &bytes[..8])
-                                            }
-                                        },
-                                        Err(_) => "location[invalid]".to_string(),
-                                    }
-                                },
-                                gimli::AttributeValue::Addr(addr) => {
-                                    // Special handling for DW_AT_low_pc and DW_AT_high_pc: add virtual base address
-                                    if attr.name() == gimli::DW_AT_low_pc || attr.name() == gimli::DW_AT_high_pc {
-                                        let virtual_addr = base_address + addr;
-                                        format!("Addr(0x{:x})", virtual_addr)
-                                    } else {
-                                        format!("{:?}", attr.value())
-                                    }
-                                },
-                                _ => format!("{:?}", attr.value()),
-                            };
-                            
-                            println!("      {}: {}", attr_name, attr_value);
-                            println!("        Form details: {}", get_attribute_value_details(&attr, &dwarf, base_address));
-                            _attr_count += 1;
-                        }
-                        
-                        die_count += 1;
-                    } else {
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    
-    println!("\nTotal compilation units found: {}", unit_count);
-    
-    // Show line number information if available
-    if !debug_line.is_empty() {
-        println!("\n--- Line Number Information ---");
-        
-        let mut units = dwarf.units();
-        if let Ok(Some(header)) = units.next() {
-            if let Ok(unit) = dwarf.unit(header) {
-                if let Some(line_program) = unit.line_program.clone() {
-                    println!("Line program found for first compilation unit");
-                    
-                    let mut rows = line_program.rows();
-                    let mut row_count = 0;
-                    
-                    while let Ok(Some((header, row))) = rows.next_row() {
-                        if row_count >= 10 {
-                            println!("  ... (showing only first 10 rows)");
-                            break;
-                        }
-                        
-                        if let Some(file) = row.file(header) {
-                            let file_name = match dwarf.attr_string(&unit, file.path_name()) {
-                                Ok(name) => name.to_string_lossy().into_owned(),
-                                Err(_) => "<unknown>".to_string(),
-                            };
-                            
-                            println!("  Row {}: {}:{} -> 0x{:x}", 
-                                     row_count + 1,
-                                     file_name,
-                                     row.line().map(|n| n.get()).unwrap_or(0),
-                                     row.address());
-                        }
-                        
-                        row_count += 1;
-                    }
-                    
-                    println!("Total line number entries: {}", row_count);
-                } else {
-                    println!("No line program found for first compilation unit");
-                }
-            }
-        }
-    }
+    println!("\n=== DWARF Debug Information (Using gimli crate) ===");
+    dump_dwarf_detailed(file);
 }
 
 #[derive(Parser)]
