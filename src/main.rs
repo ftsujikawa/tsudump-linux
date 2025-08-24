@@ -1625,7 +1625,6 @@ fn main() {
             
             dump_debug_sections(&file);
             dump_debug_info_section(&file);
-            dump_dwarf_detailed(&file);
             dump_dwarf_with_crate(&file);
         }
     }
