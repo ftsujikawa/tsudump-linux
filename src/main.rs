@@ -1,6 +1,6 @@
 use elf::{ElfBytes, endian::AnyEndian};
 use gimli::{EndianSlice, LittleEndian, Reader, Dwarf, DwLang, DwTag, DwAt};
-use iced_x86::{Decoder, DecoderOptions, Formatter, Instruction, NasmFormatter};
+use iced_x86::{Decoder, DecoderOptions, Formatter, Instruction, Mnemonic, NasmFormatter};
 use clap::{Parser, Subcommand};
 
 // Helper function to get virtual base address from ELF file
@@ -266,7 +266,124 @@ fn dwarf_at_to_string(at: DwAt) -> &'static str {
     }
 }
 
-fn dump_text_section(file: &ElfBytes<AnyEndian>) {
+struct SymbolEntry {
+    start: u64,
+    size: u64,
+    name: String,
+}
+
+type SymbolMap = Vec<SymbolEntry>;
+
+fn build_symbol_map(file: &ElfBytes<AnyEndian>) -> SymbolMap {
+    let mut symbols = Vec::new();
+
+    // Collect from both regular and dynamic symbol tables if present
+    for (sym_section, str_section) in [(".symtab", ".strtab"), (".dynsym", ".dynstr")] {
+        let sym_shdr = match file.section_header_by_name(sym_section) {
+            Ok(Some(shdr)) => shdr,
+            _ => continue,
+        };
+
+        let str_shdr = match file.section_header_by_name(str_section) {
+            Ok(Some(shdr)) => shdr,
+            _ => continue,
+        };
+
+        let (sym_data, _) = match file.section_data(&sym_shdr) {
+            Ok(data) => data,
+            Err(_) => continue,
+        };
+
+        let (str_data, _) = match file.section_data(&str_shdr) {
+            Ok(data) => data,
+            Err(_) => continue,
+        };
+
+        let symbol_size = 24; // 64-bit ELF symbol size
+        let num_symbols = if sym_shdr.sh_entsize > 0 {
+            sym_shdr.sh_size / sym_shdr.sh_entsize
+        } else {
+            0
+        };
+
+        for i in 0..num_symbols {
+            let offset = (i * symbol_size) as usize;
+            if offset + symbol_size as usize > sym_data.len() {
+                break;
+            }
+
+            let name_offset = u32::from_le_bytes([
+                sym_data[offset],
+                sym_data[offset + 1],
+                sym_data[offset + 2],
+                sym_data[offset + 3],
+            ]);
+
+            let info = sym_data[offset + 4];
+
+            let value = u64::from_le_bytes([
+                sym_data[offset + 8],
+                sym_data[offset + 9],
+                sym_data[offset + 10],
+                sym_data[offset + 11],
+                sym_data[offset + 12],
+                sym_data[offset + 13],
+                sym_data[offset + 14],
+                sym_data[offset + 15],
+            ]);
+
+            let size = u64::from_le_bytes([
+                sym_data[offset + 16],
+                sym_data[offset + 17],
+                sym_data[offset + 18],
+                sym_data[offset + 19],
+                sym_data[offset + 20],
+                sym_data[offset + 21],
+                sym_data[offset + 22],
+                sym_data[offset + 23],
+            ]);
+
+            // Only keep function symbols
+            let sym_type = info & 0xf;
+            if sym_type != 2 {
+                continue;
+            }
+
+            if (name_offset as usize) >= str_data.len() {
+                continue;
+            }
+
+            let name_start = name_offset as usize;
+            let name_end = str_data[name_start..]
+                .iter()
+                .position(|&b| b == 0)
+                .map(|pos| name_start + pos)
+                .unwrap_or(str_data.len());
+
+            let name = match std::str::from_utf8(&str_data[name_start..name_end]) {
+                Ok(s) => s.to_string(),
+                Err(_) => continue,
+            };
+
+            symbols.push(SymbolEntry { start: value, size, name });
+        }
+    }
+
+    symbols
+}
+
+fn find_symbol_name_and_offset<'a>(symbols: &'a SymbolMap, addr: u64) -> Option<(&'a str, u64)> {
+    for sym in symbols {
+        let end = if sym.size > 0 { sym.start.saturating_add(sym.size) } else { sym.start.saturating_add(1) };
+        if addr >= sym.start && addr < end {
+            let offset = addr.saturating_sub(sym.start);
+            return Some((sym.name.as_str(), offset));
+        }
+    }
+    None
+}
+
+fn dump_text_section(file: &ElfBytes<AnyEndian>, symbols: &SymbolMap) {
     // Find .text section
     let text_shdr = match file.section_header_by_name(".text") {
         Ok(Some(shdr)) => shdr,
@@ -332,10 +449,10 @@ fn dump_text_section(file: &ElfBytes<AnyEndian>) {
     }
     
     // Add disassembly section
-    disassemble_text_section(&text_data, text_shdr.sh_addr);
+    disassemble_text_section(&text_data, text_shdr.sh_addr, symbols);
 }
 
-fn disassemble_text_section(code: &[u8], base_address: u64) {
+fn disassemble_text_section(code: &[u8], base_address: u64, symbols: &SymbolMap) {
     println!();
     println!("=== .text Section Disassembly ===");
     
@@ -381,9 +498,55 @@ fn disassemble_text_section(code: &[u8], base_address: u64) {
             }
         }
         print!("{:<24} ", bytes_str);
-        
-        // Print disassembled instruction
-        println!("{}", output);
+
+        // Try to resolve target symbol for near call/jmp/je/jne instructions
+        let mut symbol_suffix = String::new();
+        let mut branch_target: Option<u64> = None;
+        match instruction.mnemonic() {
+            Mnemonic::Call | Mnemonic::Jmp => {
+                if instruction.is_call_near() || instruction.is_jmp_near() {
+                    let target = instruction.near_branch_target();
+                    branch_target = Some(target);
+                    if let Some((name, offset)) = find_symbol_name_and_offset(symbols, target) {
+                        symbol_suffix = if offset == 0 {
+                            format!(" ; {}", name)
+                        } else {
+                            format!(" ; {}+0x{:x}", name, offset)
+                        };
+                    }
+                }
+            }
+            Mnemonic::Je | Mnemonic::Jne => {
+                // Conditional near branches (JE/JNE)
+                if instruction.is_jcc_short_or_near() {
+                    let target = instruction.near_branch_target();
+                    branch_target = Some(target);
+                    if let Some((name, offset)) = find_symbol_name_and_offset(symbols, target) {
+                        symbol_suffix = if offset == 0 {
+                            format!(" ; {}", name)
+                        } else {
+                            format!(" ; {}+0x{:x}", name, offset)
+                        };
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        // Fallback: if no function symbol, still show label-like name within .text
+        if symbol_suffix.is_empty() {
+            if let Some(target) = branch_target {
+                let text_start = base_address;
+                let text_end = base_address.saturating_add(code.len() as u64);
+                if target >= text_start && target < text_end {
+                    let off = target.saturating_sub(text_start);
+                    symbol_suffix = format!(" ; .text+0x{:x}", off);
+                }
+            }
+        }
+
+        // Print disassembled instruction with optional symbol name
+        println!("{}{}", output, symbol_suffix);
         
         instruction_count += 1;
     }
@@ -1579,7 +1742,8 @@ fn main() {
         },
         Some(Commands::Text) => {
             println!("=== .text Section Dump ===");
-            dump_text_section(&file);
+            let symbols = build_symbol_map(&file);
+            dump_text_section(&file, &symbols);
         },
         Some(Commands::Data) => {
             println!("=== .data Section Dump ===");
@@ -1610,7 +1774,8 @@ fn main() {
             
             println!();
             println!("=== .text Section Dump ===");
-            dump_text_section(&file);
+            let symbols = build_symbol_map(&file);
+            dump_text_section(&file, &symbols);
             
             println!();
             println!("=== .data Section Dump ===");
