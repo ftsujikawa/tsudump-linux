@@ -365,6 +365,7 @@ fn build_symbol_map(file: &ElfBytes<AnyEndian>) -> SymbolMap {
                 Err(_) => continue,
             };
 
+            // Store symbol value directly (ELF VMA), to match objdump -d
             symbols.push(SymbolEntry { start: value, size, name });
         }
     }
@@ -417,7 +418,7 @@ fn dump_text_section(file: &ElfBytes<AnyEndian>, symbols: &SymbolMap) {
     println!("Dumping first {} bytes:", dump_size);
     
     for (i, chunk) in text_data[..dump_size].chunks(16).enumerate() {
-        // Print offset
+        // Print offset (ELF virtual address from section header)
         print!("{:08x}: ", text_shdr.sh_addr + (i * 16) as u64);
         
         // Print hex bytes
@@ -448,13 +449,56 @@ fn dump_text_section(file: &ElfBytes<AnyEndian>, symbols: &SymbolMap) {
         println!("|");
     }
     
-    // Add disassembly section
+    // Add disassembly section, using section VMA as base IP (matches objdump -d)
     disassemble_text_section(&text_data, text_shdr.sh_addr, symbols);
+}
+
+fn dump_other_executable_sections(file: &ElfBytes<AnyEndian>, symbols: &SymbolMap) {
+    let section_headers = match file.section_headers() {
+        Some(h) => h,
+        None => return,
+    };
+
+    let string_table = match file.section_headers_with_strtab() {
+        Ok((_, strtab)) => strtab,
+        Err(_) => return,
+    };
+
+    for sh in section_headers.iter() {
+        // Skip non-executable sections
+        if sh.sh_flags & 0x4 == 0 { // SHF_EXECINSTR
+            continue;
+        }
+
+        let name = match string_table {
+            Some(ref strtab) => strtab.get(sh.sh_name as usize).unwrap_or("<invalid>"),
+            None => "<no-strtab>",
+        };
+
+        // .text は既に別途処理しているのでスキップ
+        if name == ".text" {
+            continue;
+        }
+
+        let (data, _) = match file.section_data(&sh) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        if data.is_empty() {
+            continue;
+        }
+
+        println!();
+        println!("=== {} Section Disassembly ===", name);
+
+        disassemble_text_section(data, sh.sh_addr, symbols);
+    }
 }
 
 fn disassemble_text_section(code: &[u8], base_address: u64, symbols: &SymbolMap) {
     println!();
-    println!("=== .text Section Disassembly ===");
+    println!("=== Section Disassembly (base 0x{:x}) ===", base_address);
     
     // Create decoder for x86-64
     let mut decoder = Decoder::with_ip(64, code, base_address, DecoderOptions::NONE);
@@ -1744,6 +1788,7 @@ fn main() {
             println!("=== .text Section Dump ===");
             let symbols = build_symbol_map(&file);
             dump_text_section(&file, &symbols);
+            dump_other_executable_sections(&file, &symbols);
         },
         Some(Commands::Data) => {
             println!("=== .data Section Dump ===");
@@ -1776,6 +1821,7 @@ fn main() {
             println!("=== .text Section Dump ===");
             let symbols = build_symbol_map(&file);
             dump_text_section(&file, &symbols);
+            dump_other_executable_sections(&file, &symbols);
             
             println!();
             println!("=== .data Section Dump ===");
